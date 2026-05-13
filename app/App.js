@@ -42,8 +42,17 @@ export default function App() {
   const pendingEventTime = useRef(null);
 
   const { bleStatus, bleError, deviceName, sampleCount, startBle, stopBle, drainSamples, drainAccSamples, getSessionElapsed } = usePolarH10();
-  const { startSession, logEcgPoints, logAccPoints, logEvent, endSession, resetDirectory } = useSessionLogger();
+  const { startSession, logEcgPoints, logAccPoints, logEvent, flushSession, endSession, resetDirectory } = useSessionLogger();
   const isRecording = bleStatus === 'streaming';
+
+  // Flush all streams to disk every 5 minutes
+  useEffect(() => {
+    if (!isRecording) return;
+    const id = setInterval(() => {
+      try { flushSession(); } catch (e) { console.warn('Periodic flush failed:', e); }
+    }, 10_000);
+    return () => clearInterval(id);
+  }, [isRecording, flushSession]);
 
   // Drain BLE buffers → update graphs + write to CSV
   useEffect(() => {
