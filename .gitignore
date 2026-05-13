@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+app/node_modules/
+
+# Expo
+app/.expo/
+app/dist/
+
+# Android build
+app/android/.gradle/
+app/android/build/
+app/android/app/build/
+app/android/local.properties
+app/android/.idea/
+
+# iOS build
+app/ios/build/
+app/ios/Pods/
+app/ios/*.xcworkspace
+app/ios/*.xcuserdata
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
