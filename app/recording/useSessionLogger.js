@@ -45,17 +45,18 @@ export function useSessionLogger() {
     }
 
     const ts = buildTimestamp();
-    let ecgUri, eventsUri;
+    let ecgUri, eventsUri, accUri;
     try {
       ecgUri    = await createCsv(dirUri, `polar_${ts}_ecg`);
       eventsUri = await createCsv(dirUri, `polar_${ts}_events`);
+      accUri    = await createCsv(dirUri, `polar_${ts}_acc`);
     } catch (e) {
       // Permission may have been revoked — clear and let user re-pick next time
       await AsyncStorage.removeItem(SAF_DIR_KEY);
       throw new Error(`Не удалось создать файлы: ${e.message}. Попробуйте ещё раз — появится выбор папки.`);
     }
 
-    sessionRef.current = { ecgUri, eventsUri, ecgLines: [], eventLines: [] };
+    sessionRef.current = { ecgUri, eventsUri, accUri, ecgLines: [], eventLines: [], accLines: [] };
     return true;
   }, []);
 
@@ -63,6 +64,13 @@ export function useSessionLogger() {
     if (!sessionRef.current) return;
     for (const p of pts) {
       sessionRef.current.ecgLines.push(`${p.x.toFixed(4)},${p.y.toFixed(6)}`);
+    }
+  }, []);
+
+  const logAccPoints = useCallback((pts) => {
+    if (!sessionRef.current) return;
+    for (const p of pts) {
+      sessionRef.current.accLines.push(`${p.t.toFixed(4)},${p.x},${p.y},${p.z}`);
     }
   }, []);
 
@@ -79,13 +87,15 @@ export function useSessionLogger() {
     if (!session) return null;
     sessionRef.current = null;
 
-    const ecgContent    = 'timestamp_s,ecg_mV\n'           + session.ecgLines.join('\n')   + '\n';
-    const eventsContent = 'timestamp,stress,description\n' + session.eventLines.join('\n') + (session.eventLines.length ? '\n' : '');
+    const ecgContent    = 'timestamp_s,ecg_mV\n'                    + session.ecgLines.join('\n')  + '\n';
+    const eventsContent = 'timestamp,stress,description\n'          + session.eventLines.join('\n') + (session.eventLines.length ? '\n' : '');
+    const accContent    = 'timestamp_s,acc_x_mG,acc_y_mG,acc_z_mG\n' + session.accLines.join('\n') + (session.accLines.length ? '\n' : '');
 
     await writeAsStringAsync(session.ecgUri,    ecgContent,    { encoding: EncodingType.UTF8 });
     await writeAsStringAsync(session.eventsUri, eventsContent, { encoding: EncodingType.UTF8 });
+    await writeAsStringAsync(session.accUri,    accContent,    { encoding: EncodingType.UTF8 });
 
-    return { ecgUri: session.ecgUri, eventsUri: session.eventsUri };
+    return { ecgUri: session.ecgUri, eventsUri: session.eventsUri, accUri: session.accUri };
   }, []);
 
   // Call to forget the saved folder and show picker again next session
@@ -93,5 +103,5 @@ export function useSessionLogger() {
     await AsyncStorage.removeItem(SAF_DIR_KEY);
   }, []);
 
-  return { startSession, logEcgPoints, logEvent, endSession, resetDirectory };
+  return { startSession, logEcgPoints, logAccPoints, logEvent, endSession, resetDirectory };
 }

@@ -1,8 +1,9 @@
 {
   "expo": {
-    "name": "app",
-    "slug": "app",
+    "name": "Polar H10 Tracker",
+    "slug": "polar-h10-tracker",
     "version": "1.0.0",
+    "description": "Real-time ECG recording and event logging via Polar H10 BLE",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",

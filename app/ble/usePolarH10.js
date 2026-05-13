@@ -4,7 +4,8 @@ import { BleManager, State } from 'react-native-ble-plx';
 import {
   PMD_SERVICE, PMD_CONTROL, PMD_DATA,
   ECG_START, ECG_STOP,
-  bytesToBase64, base64ToBytes, parseEcgFrame,
+  ACC_FS, ACC_START, ACC_STOP,
+  bytesToBase64, base64ToBytes, parseEcgFrame, parseAccFrame,
 } from './polarProtocol';
 
 const SAMPLE_RATE = 130;
@@ -39,6 +40,8 @@ export function usePolarH10() {
   const scanTimerRef  = useRef(null);
   const bufferRef     = useRef([]);
   const timeRef       = useRef(0);
+  const accBufferRef  = useRef([]);
+  const accTimeRef    = useRef(0);
   const sampleAccRef  = useRef(0); // accumulator between setSampleCount calls
 
   useEffect(() => {
@@ -68,6 +71,8 @@ export function usePolarH10() {
     sampleAccRef.current = 0;
     bufferRef.current = [];
     timeRef.current = 0;
+    accBufferRef.current = [];
+    accTimeRef.current = 0;
 
     const bleState = await manager.state();
     if (bleState !== State.PoweredOn) {
@@ -120,13 +125,20 @@ export function usePolarH10() {
             if (ctrlErr || !char?.value) return;
             const bytes = base64ToBytes(char.value);
             if (bytes[0] === 0xF0 && bytes[3] !== 0x00) {
-              setStatus('error');
-              setErrorMsg(`Polar ECG start failed (code 0x${bytes[3].toString(16).toUpperCase()})`);
+              const mtype = bytes[2]; // 0x00=ECG, 0x02=ACC
+              const code  = bytes[3].toString(16).toUpperCase();
+              if (mtype === 0x00) {
+                setStatus('error');
+                setErrorMsg(`ECG start failed (code 0x${code})`);
+              } else {
+                // ACC error — keep ECG running, just warn
+                console.warn(`ACC start failed (code 0x${code}) — accelerometer disabled`);
+              }
             }
           },
         );
 
-        // Monitor PMD_DATA for ECG frames
+        // Monitor PMD_DATA for ECG and ACC frames (dispatched by byte[0])
         dataSubRef.current = connected.monitorCharacteristicForService(
           PMD_SERVICE, PMD_DATA,
           (notifyErr, char) => {
@@ -136,23 +148,38 @@ export function usePolarH10() {
             }
             if (!char?.value) return;
             const bytes = base64ToBytes(char.value);
-            const samples = parseEcgFrame(bytes);
-            if (samples.length === 0) return;
-            samples.forEach((uV) => {
-              timeRef.current += 1 / SAMPLE_RATE;
-              bufferRef.current.push({ x: timeRef.current, y: uV * 1e-3 }); // µV → mV
-            });
-            // Update debug counter every ~65 samples (~0.5 sec) to avoid re-render spam
-            sampleAccRef.current += samples.length;
-            if (sampleAccRef.current >= 65) {
-              setSampleCount((n) => n + sampleAccRef.current);
-              sampleAccRef.current = 0;
+
+            if (bytes[0] === 0x00) {
+              // ECG frame
+              const samples = parseEcgFrame(bytes);
+              if (samples.length === 0) return;
+              samples.forEach((uV) => {
+                timeRef.current += 1 / SAMPLE_RATE;
+                bufferRef.current.push({ x: timeRef.current, y: uV * 1e-3 }); // µV → mV
+              });
+              sampleAccRef.current += samples.length;
+              if (sampleAccRef.current >= 65) {
+                setSampleCount((n) => n + sampleAccRef.current);
+                sampleAccRef.current = 0;
+              }
+            } else if (bytes[0] === 0x02) {
+              // ACC frame
+              const samples = parseAccFrame(bytes);
+              samples.forEach(({ x, y, z }) => {
+                accTimeRef.current += 1 / ACC_FS;
+                accBufferRef.current.push({ t: accTimeRef.current, x, y, z });
+              });
             }
           },
         );
 
         await connected.writeCharacteristicWithResponseForService(
           PMD_SERVICE, PMD_CONTROL, bytesToBase64(ECG_START),
+        );
+        // Small delay so the device finishes processing ECG start before ACC start
+        await new Promise((r) => setTimeout(r, 300));
+        await connected.writeCharacteristicWithResponseForService(
+          PMD_SERVICE, PMD_CONTROL, bytesToBase64(ACC_START),
         );
 
         setStatus('streaming');
@@ -173,6 +200,9 @@ export function usePolarH10() {
           await device.writeCharacteristicWithResponseForService(
             PMD_SERVICE, PMD_CONTROL, bytesToBase64(ECG_STOP),
           );
+          await device.writeCharacteristicWithResponseForService(
+            PMD_SERVICE, PMD_CONTROL, bytesToBase64(ACC_STOP),
+          );
           await device.cancelConnection();
         }
       } catch (_) {}
@@ -180,6 +210,8 @@ export function usePolarH10() {
     }
     bufferRef.current = [];
     timeRef.current = 0;
+    accBufferRef.current = [];
+    accTimeRef.current = 0;
     setStatus('idle');
     setDeviceName(null);
     setSampleCount(0);
@@ -192,5 +224,11 @@ export function usePolarH10() {
     return pts;
   }, []);
 
-  return { bleStatus: status, bleError: errorMsg, deviceName, sampleCount, startBle: start, stopBle: stop, drainSamples };
+  const drainAccSamples = useCallback(() => {
+    const pts = accBufferRef.current;
+    accBufferRef.current = [];
+    return pts;
+  }, []);
+
+  return { bleStatus: status, bleError: errorMsg, deviceName, sampleCount, startBle: start, stopBle: stop, drainSamples, drainAccSamples };
 }

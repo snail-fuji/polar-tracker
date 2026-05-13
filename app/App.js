@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import EcgGraph from './components/EcgGraph';
+import AccGraph from './components/AccGraph';
 import EventsTable from './components/EventsTable';
 import AddEventModal from './components/AddEventModal';
 import { usePolarH10 } from './ble/usePolarH10';
@@ -19,6 +20,9 @@ const SAMPLE_RATE = 130;
 const WINDOW_SECONDS = 5;
 const MAX_SAMPLES = SAMPLE_RATE * WINDOW_SECONDS; // 650
 const DRAIN_INTERVAL_MS = 100;
+
+const ACC_SAMPLE_RATE  = 25;
+const MAX_ACC_SAMPLES  = ACC_SAMPLE_RATE * WINDOW_SECONDS; // 125
 
 const STATUS_LABEL = {
   idle:       { text: 'Остановлено',           color: '#6b7280' },
@@ -30,34 +34,52 @@ const STATUS_LABEL = {
 
 export default function App() {
   const [ecgData, setEcgData] = useState([]);
+  const [accData, setAccData] = useState([]);
   const [events, setEvents] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [savedPaths, setSavedPaths] = useState(null);
   const pendingEventTime = useRef(null);
 
-  const { bleStatus, bleError, deviceName, sampleCount, startBle, stopBle, drainSamples } = usePolarH10();
-  const { startSession, logEcgPoints, logEvent, endSession, resetDirectory } = useSessionLogger();
+  const { bleStatus, bleError, deviceName, sampleCount, startBle, stopBle, drainSamples, drainAccSamples } = usePolarH10();
+  const { startSession, logEcgPoints, logAccPoints, logEvent, endSession, resetDirectory } = useSessionLogger();
   const isRecording = bleStatus === 'streaming';
 
-  // Drain BLE buffer → update graph + write to CSV
+  // Drain BLE buffers → update graphs + write to CSV
   useEffect(() => {
     if (!isRecording) return;
     const id = setInterval(() => {
-      const pts = drainSamples();
-      if (pts.length === 0) return;
-      logEcgPoints(pts);
-      setEcgData((prev) => {
-        const next = [...prev, ...pts];
-        return next.length > MAX_SAMPLES ? next.slice(next.length - MAX_SAMPLES) : next;
-      });
+      // ECG
+      const ecgPts = drainSamples();
+      if (ecgPts.length > 0) {
+        logEcgPoints(ecgPts);
+        setEcgData((prev) => {
+          const next = [...prev, ...ecgPts];
+          return next.length > MAX_SAMPLES ? next.slice(next.length - MAX_SAMPLES) : next;
+        });
+      }
+
+      // ACC — amplitude per sample, 5-second rolling window
+      const accPts = drainAccSamples();
+      if (accPts.length > 0) {
+        logAccPoints(accPts);
+        const amplPts = accPts.map(({ t, x, y, z }) => ({
+          x: t,
+          y: Math.sqrt(x * x + y * y + z * z),
+        }));
+        setAccData((prev) => {
+          const next = [...prev, ...amplPts];
+          return next.length > MAX_ACC_SAMPLES ? next.slice(next.length - MAX_ACC_SAMPLES) : next;
+        });
+      }
     }, DRAIN_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [isRecording, drainSamples, logEcgPoints]);
+  }, [isRecording, drainSamples, drainAccSamples, logEcgPoints, logAccPoints]); // eslint-disable-line
 
   const handleToggleRecording = async () => {
     if (bleStatus === 'idle' || bleStatus === 'error') {
       setSavedPaths(null);
       setEcgData([]);
+      setAccData([]);
       setEvents([]);
       let sessionStarted = false;
       try {
@@ -144,15 +166,11 @@ export default function App() {
         {savedPaths && (
           <View style={styles.savedBox}>
             <Text style={styles.savedTitle}>✅ Сессия сохранена в выбранную папку</Text>
-            <Text style={styles.savedPath}>{savedPaths.ecgUri?.split('/').pop() ?? 'ecg.csv'}</Text>
+            <Text style={styles.savedPath}>{savedPaths.ecgUri?.split('/').pop()    ?? 'ecg.csv'}</Text>
+            <Text style={styles.savedPath}>{savedPaths.accUri?.split('/').pop()    ?? 'acc.csv'}</Text>
             <Text style={styles.savedPath}>{savedPaths.eventsUri?.split('/').pop() ?? 'events.csv'}</Text>
           </View>
         )}
-
-        {/* Graph */}
-        <Text style={styles.sectionLabel}>ECG — последние 5 секунд</Text>
-        <EcgGraph data={ecgData} />
-        <Text style={styles.hint}>Pinch / drag для масштабирования по времени</Text>
 
         {/* Events */}
         <Text style={styles.sectionLabel}>Tracked events</Text>
@@ -161,6 +179,16 @@ export default function App() {
         <TouchableOpacity style={styles.addBtn} onPress={handleAddEvent} activeOpacity={0.8}>
           <Text style={styles.addBtnText}>＋  Add Event</Text>
         </TouchableOpacity>
+
+        {/* ECG Graph */}
+        <Text style={styles.sectionLabel}>ECG — последние 5 секунд</Text>
+        <EcgGraph data={ecgData} />
+        <Text style={styles.hint}>Pinch / drag для масштабирования по времени</Text>
+
+        {/* ACC Graph */}
+        <Text style={styles.sectionLabel}>Акселерометр — последние 5 секунд</Text>
+        <AccGraph data={accData} />
+        <Text style={styles.hint}>Pinch / drag для масштабирования по времени</Text>
 
       </ScrollView>
 
