@@ -5,7 +5,8 @@ import {
   PMD_SERVICE, PMD_CONTROL, PMD_DATA,
   ECG_START, ECG_STOP,
   ACC_FS, ACC_START, ACC_STOP,
-  bytesToBase64, base64ToBytes, parseEcgFrame, parseAccFrame,
+  bytesToBase64, base64ToBytes,
+  parseEcgFrame, parseAccFrame, extractFrameTimestampNs,
 } from './polarProtocol';
 
 const SAMPLE_RATE = 130;
@@ -38,10 +39,10 @@ export function usePolarH10() {
   const dataSubRef    = useRef(null);
   const ctrlSubRef    = useRef(null);
   const scanTimerRef  = useRef(null);
-  const bufferRef     = useRef([]);
-  const timeRef       = useRef(0);
-  const accBufferRef  = useRef([]);
-  const accTimeRef    = useRef(0);
+  const bufferRef          = useRef([]);
+  const accBufferRef       = useRef([]);
+  const sessionStartNsRef  = useRef(null); // BigInt, device ns of first frame
+  const sessionWallMsRef   = useRef(null); // Date.now() when sessionStartNs was set
   const sampleAccRef  = useRef(0); // accumulator between setSampleCount calls
 
   useEffect(() => {
@@ -70,9 +71,9 @@ export function usePolarH10() {
     setSampleCount(0);
     sampleAccRef.current = 0;
     bufferRef.current = [];
-    timeRef.current = 0;
     accBufferRef.current = [];
-    accTimeRef.current = 0;
+    sessionStartNsRef.current = null;
+    sessionWallMsRef.current  = null;
 
     const bleState = await manager.state();
     if (bleState !== State.PoweredOn) {
@@ -153,9 +154,14 @@ export function usePolarH10() {
               // ECG frame
               const samples = parseEcgFrame(bytes);
               if (samples.length === 0) return;
-              samples.forEach((uV) => {
-                timeRef.current += 1 / SAMPLE_RATE;
-                bufferRef.current.push({ x: timeRef.current, y: uV * 1e-3 }); // µV → mV
+              const frameNs = extractFrameTimestampNs(bytes);
+              if (sessionStartNsRef.current === null) {
+                sessionStartNsRef.current = frameNs;
+                sessionWallMsRef.current  = Date.now();
+              }
+              const baseS = Number(frameNs - sessionStartNsRef.current) / 1e9;
+              samples.forEach((uV, i) => {
+                bufferRef.current.push({ x: baseS + i / SAMPLE_RATE, y: uV * 1e-3 });
               });
               sampleAccRef.current += samples.length;
               if (sampleAccRef.current >= 65) {
@@ -165,9 +171,15 @@ export function usePolarH10() {
             } else if (bytes[0] === 0x02) {
               // ACC frame
               const samples = parseAccFrame(bytes);
-              samples.forEach(({ x, y, z }) => {
-                accTimeRef.current += 1 / ACC_FS;
-                accBufferRef.current.push({ t: accTimeRef.current, x, y, z });
+              if (samples.length === 0) return;
+              const frameNs = extractFrameTimestampNs(bytes);
+              if (sessionStartNsRef.current === null) {
+                sessionStartNsRef.current = frameNs;
+                sessionWallMsRef.current  = Date.now();
+              }
+              const baseS = Number(frameNs - sessionStartNsRef.current) / 1e9;
+              samples.forEach(({ x, y, z }, i) => {
+                accBufferRef.current.push({ t: baseS + i / ACC_FS, x, y, z });
               });
             }
           },
@@ -209,9 +221,9 @@ export function usePolarH10() {
       deviceRef.current = null;
     }
     bufferRef.current = [];
-    timeRef.current = 0;
     accBufferRef.current = [];
-    accTimeRef.current = 0;
+    sessionStartNsRef.current = null;
+    sessionWallMsRef.current  = null;
     setStatus('idle');
     setDeviceName(null);
     setSampleCount(0);
@@ -230,5 +242,11 @@ export function usePolarH10() {
     return pts;
   }, []);
 
-  return { bleStatus: status, bleError: errorMsg, deviceName, sampleCount, startBle: start, stopBle: stop, drainSamples, drainAccSamples };
+  // Returns elapsed seconds since the first BLE frame of this session (wall-clock based).
+  const getSessionElapsed = useCallback(() => {
+    if (sessionWallMsRef.current === null) return 0;
+    return (Date.now() - sessionWallMsRef.current) / 1000;
+  }, []);
+
+  return { bleStatus: status, bleError: errorMsg, deviceName, sampleCount, startBle: start, stopBle: stop, drainSamples, drainAccSamples, getSessionElapsed };
 }

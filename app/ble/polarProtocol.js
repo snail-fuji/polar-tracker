@@ -14,6 +14,14 @@ export const ACC_FS    = 25;
 export const ACC_START = [0x02, 0x02, 0x00, 0x01, 0x19, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00];
 export const ACC_STOP  = [0x03, 0x02];
 
+// Extract device timestamp from PMD frame bytes[1..8] (uint64 LE, nanoseconds).
+// Returns a BigInt so precision is not lost before subtraction.
+export function extractFrameTimestampNs(bytes) {
+  const lo = ((bytes[1] | (bytes[2] << 8) | (bytes[3] << 16) | (bytes[4] << 24)) >>> 0);
+  const hi = ((bytes[5] | (bytes[6] << 8) | (bytes[7] << 16) | (bytes[8] << 24)) >>> 0);
+  return (BigInt(hi) << 32n) | BigInt(lo);
+}
+
 export function bytesToBase64(bytes) {
   return btoa(String.fromCharCode(...bytes));
 }

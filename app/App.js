@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
+  Modal,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -40,7 +41,7 @@ export default function App() {
   const [savedPaths, setSavedPaths] = useState(null);
   const pendingEventTime = useRef(null);
 
-  const { bleStatus, bleError, deviceName, sampleCount, startBle, stopBle, drainSamples, drainAccSamples } = usePolarH10();
+  const { bleStatus, bleError, deviceName, sampleCount, startBle, stopBle, drainSamples, drainAccSamples, getSessionElapsed } = usePolarH10();
   const { startSession, logEcgPoints, logAccPoints, logEvent, endSession, resetDirectory } = useSessionLogger();
   const isRecording = bleStatus === 'streaming';
 
@@ -105,12 +106,12 @@ export default function App() {
   };
 
   const handleAddEvent = () => {
-    pendingEventTime.current = new Date();
+    pendingEventTime.current = getSessionElapsed();
     setShowModal(true);
   };
 
   const handleEventConfirm = ({ description, stress }) => {
-    const event = { id: Date.now(), time: pendingEventTime.current, description, stress };
+    const event = { id: Date.now(), timeS: pendingEventTime.current, description, stress };
     setEvents((prev) => [...prev, event]);
     logEvent(event); // sync, no await
     setShowModal(false);
@@ -162,15 +163,6 @@ export default function App() {
           <Text style={styles.errorText}>{bleError}</Text>
         )}
 
-        {/* Saved session paths */}
-        {savedPaths && (
-          <View style={styles.savedBox}>
-            <Text style={styles.savedTitle}>✅ Сессия сохранена в выбранную папку</Text>
-            <Text style={styles.savedPath}>{savedPaths.ecgUri?.split('/').pop()    ?? 'ecg.csv'}</Text>
-            <Text style={styles.savedPath}>{savedPaths.accUri?.split('/').pop()    ?? 'acc.csv'}</Text>
-            <Text style={styles.savedPath}>{savedPaths.eventsUri?.split('/').pop() ?? 'events.csv'}</Text>
-          </View>
-        )}
 
         {/* Events */}
         <Text style={styles.sectionLabel}>Tracked events</Text>
@@ -197,6 +189,28 @@ export default function App() {
         onConfirm={handleEventConfirm}
         onCancel={() => setShowModal(false)}
       />
+
+      <Modal
+        visible={!!savedPaths}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSavedPaths(null)}
+      >
+        <View style={styles.savedOverlay}>
+          <View style={styles.savedDialog}>
+            <Text style={styles.savedDialogTitle}>Сессия сохранена</Text>
+            <Text style={styles.savedDialogSub}>Файлы записаны в выбранную папку:</Text>
+            <View style={styles.savedFiles}>
+              <Text style={styles.savedPath}>{savedPaths?.ecgUri?.split('/').pop()    ?? 'ecg.csv'}</Text>
+              <Text style={styles.savedPath}>{savedPaths?.accUri?.split('/').pop()    ?? 'acc.csv'}</Text>
+              <Text style={styles.savedPath}>{savedPaths?.eventsUri?.split('/').pop() ?? 'events.csv'}</Text>
+            </View>
+            <TouchableOpacity style={styles.savedOkBtn} onPress={() => setSavedPaths(null)} activeOpacity={0.8}>
+              <Text style={styles.savedOkText}>OK</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -235,14 +249,32 @@ const styles = StyleSheet.create({
   },
   addBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
 
-  savedBox: {
-    backgroundColor: '#f0fdf4',
-    borderWidth: 1,
-    borderColor: '#bbf7d0',
-    borderRadius: 8,
-    padding: 12,
-    gap: 4,
+  savedOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
   },
-  savedTitle: { fontSize: 13, fontWeight: '600', color: '#15803d' },
-  savedPath:  { fontSize: 11, color: '#166534', fontFamily: 'monospace' },
+  savedDialog: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    padding: 24,
+    gap: 12,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 10,
+  },
+  savedDialogTitle: { fontSize: 17, fontWeight: '700', color: '#111827' },
+  savedDialogSub:   { fontSize: 13, color: '#6b7280' },
+  savedFiles: { gap: 4 },
+  savedPath:  { fontSize: 12, color: '#166534', fontFamily: 'monospace' },
+  savedOkBtn: {
+    backgroundColor: '#16a34a',
+    paddingVertical: 11,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  savedOkText: { color: '#fff', fontSize: 15, fontWeight: '700' },
 });

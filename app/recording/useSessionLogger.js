@@ -78,7 +78,7 @@ export function useSessionLogger() {
     if (!sessionRef.current) return;
     const desc = event.description.replace(/"/g, '""');
     sessionRef.current.eventLines.push(
-      `${event.time.toISOString()},${event.stress},"${desc}"`,
+      `${event.timeS.toFixed(3)},${event.stress},"${desc}"`,
     );
   }, []);
 
@@ -88,7 +88,7 @@ export function useSessionLogger() {
     sessionRef.current = null;
 
     const ecgContent    = 'timestamp_s,ecg_mV\n'                    + session.ecgLines.join('\n')  + '\n';
-    const eventsContent = 'timestamp,stress,description\n'          + session.eventLines.join('\n') + (session.eventLines.length ? '\n' : '');
+    const eventsContent = 'timestamp_s,stress,description\n'         + session.eventLines.join('\n') + (session.eventLines.length ? '\n' : '');
     const accContent    = 'timestamp_s,acc_x_mG,acc_y_mG,acc_z_mG\n' + session.accLines.join('\n') + (session.accLines.length ? '\n' : '');
 
     await writeAsStringAsync(session.ecgUri,    ecgContent,    { encoding: EncodingType.UTF8 });

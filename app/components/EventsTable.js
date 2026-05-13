@@ -6,12 +6,10 @@ const STRESS_COLORS = {
   Low:  { color: '#22c55e', bg: '#dcfce7' },
 };
 
-function formatTime(date) {
-  return date.toLocaleTimeString('ru-RU', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
+function formatElapsed(s) {
+  const m   = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, '0')}`;
 }
 
 export default function EventsTable({ events }) {
@@ -22,7 +20,7 @@ export default function EventsTable({ events }) {
   return (
     <View style={styles.table}>
       <View style={[styles.row, styles.header]}>
-        <Text style={[styles.cellTime, styles.headerText]}>EventTime</Text>
+        <Text style={[styles.cellTime, styles.headerText]}>t (m:ss)</Text>
         <Text style={[styles.cellStress, styles.headerText]}>Stress</Text>
         <Text style={[styles.cellDesc, styles.headerText]}>Description</Text>
       </View>
@@ -34,7 +32,7 @@ export default function EventsTable({ events }) {
           const s = STRESS_COLORS[item.stress] ?? STRESS_COLORS.Med;
           return (
             <View style={[styles.row, index % 2 === 0 && styles.rowAlt]}>
-              <Text style={styles.cellTime}>{formatTime(item.time)}</Text>
+              <Text style={styles.cellTime}>{formatElapsed(item.timeS ?? 0)}</Text>
               <View style={styles.cellStress}>
                 <View style={[styles.stressBadge, { backgroundColor: s.bg }]}>
                   <Text style={[styles.stressBadgeText, { color: s.color }]}>{item.stress}</Text>
