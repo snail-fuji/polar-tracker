@@ -10,7 +10,8 @@ import {
 import { File } from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const SAF_DIR_KEY = 'polar_saf_dir_uri';
+const SAF_DIR_KEY      = 'polar_saf_dir_uri';
+const ACTIVE_SESSION_KEY = 'polar_active_session';
 
 async function getSavedDirUri() {
   try { return await AsyncStorage.getItem(SAF_DIR_KEY); } catch { return null; }
@@ -83,6 +84,9 @@ export function useSessionLogger() {
       ecgTmp, accTmp, eventsTmp,
       ecgLines: [], accLines: [], eventLines: [],
     };
+    await AsyncStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify({
+      ecgUri, accUri, eventsUri, ecgTmp, accTmp, eventsTmp,
+    }));
     return true;
   }, []);
 
@@ -119,6 +123,7 @@ export function useSessionLogger() {
     flushSession();
     const session = sessionRef.current;
     sessionRef.current = null;
+    await AsyncStorage.removeItem(ACTIVE_SESSION_KEY);
 
     const [ecgContent, accContent, eventsContent] = await Promise.all([
       readAsStringAsync(session.ecgTmp,    UTF8),
@@ -139,9 +144,23 @@ export function useSessionLogger() {
     return { ecgUri: session.ecgUri, accUri: session.accUri, eventsUri: session.eventsUri };
   }, [flushSession]);
 
+  // Reattach to a session that survived an app restart (process stayed alive via FGS).
+  // Call on mount when polarService is already streaming.
+  const restoreSession = useCallback(async () => {
+    try {
+      const saved = await AsyncStorage.getItem(ACTIVE_SESSION_KEY);
+      if (!saved) return false;
+      const meta = JSON.parse(saved);
+      sessionRef.current = { ...meta, ecgLines: [], accLines: [], eventLines: [] };
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
   const resetDirectory = useCallback(async () => {
     await AsyncStorage.removeItem(SAF_DIR_KEY);
   }, []);
 
-  return { startSession, logEcgPoints, logAccPoints, logEvent, flushSession, endSession, resetDirectory };
+  return { startSession, restoreSession, logEcgPoints, logAccPoints, logEvent, flushSession, endSession, resetDirectory };
 }

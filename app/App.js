@@ -26,11 +26,12 @@ const ACC_SAMPLE_RATE  = 25;
 const MAX_ACC_SAMPLES  = ACC_SAMPLE_RATE * WINDOW_SECONDS; // 125
 
 const STATUS_LABEL = {
-  idle:       { text: 'Остановлено',           color: '#6b7280' },
-  scanning:   { text: 'Поиск Polar H10…',      color: '#d97706' },
-  connecting: { text: 'Подключение…',          color: '#d97706' },
-  streaming:  { text: 'Запись',                color: '#16a34a' },
-  error:      { text: 'Ошибка',                color: '#dc2626' },
+  idle:         { text: 'Остановлено',           color: '#6b7280' },
+  scanning:     { text: 'Поиск Polar H10…',      color: '#d97706' },
+  connecting:   { text: 'Подключение…',          color: '#d97706' },
+  streaming:    { text: 'Запись',                color: '#16a34a' },
+  reconnecting: { text: 'Переподключение…',      color: '#d97706' },
+  error:        { text: 'Ошибка',                color: '#dc2626' },
 };
 
 export default function App() {
@@ -42,8 +43,15 @@ export default function App() {
   const pendingEventTime = useRef(null);
 
   const { bleStatus, bleError, deviceName, sampleCount, startBle, stopBle, drainSamples, drainAccSamples, getSessionElapsed } = usePolarH10();
-  const { startSession, logEcgPoints, logAccPoints, logEvent, flushSession, endSession, resetDirectory } = useSessionLogger();
+  const { startSession, restoreSession, logEcgPoints, logAccPoints, logEvent, flushSession, endSession, resetDirectory } = useSessionLogger();
   const isRecording = bleStatus === 'streaming';
+
+  // If the app was restarted while the FGS kept BLE alive, reattach to the active session
+  useEffect(() => {
+    if (bleStatus === 'streaming') {
+      restoreSession().catch(console.warn);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Flush all streams to disk every 5 minutes
   useEffect(() => {
@@ -128,11 +136,12 @@ export default function App() {
 
   const statusInfo = STATUS_LABEL[bleStatus] ?? STATUS_LABEL.idle;
   const recordBtnLabel =
-    bleStatus === 'idle'      ? '⏺  Start recording' :
-    bleStatus === 'scanning'  ? '⏳  Scanning…'        :
-    bleStatus === 'connecting'? '⏳  Connecting…'      :
-    bleStatus === 'streaming' ? '⏹  Stop recording'   :
-                                '⏺  Retry';
+    bleStatus === 'idle'         ? '⏺  Start recording'  :
+    bleStatus === 'scanning'     ? '⏳  Scanning…'         :
+    bleStatus === 'connecting'   ? '⏳  Connecting…'       :
+    bleStatus === 'streaming'    ? '⏹  Stop recording'    :
+    bleStatus === 'reconnecting' ? '⏳  Reconnecting…'     :
+                                   '⏺  Retry';
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -146,10 +155,10 @@ export default function App() {
           style={[
             styles.recordBtn,
             isRecording && styles.recordBtnActive,
-            (bleStatus === 'scanning' || bleStatus === 'connecting') && styles.recordBtnPending,
+            (bleStatus === 'scanning' || bleStatus === 'connecting' || bleStatus === 'reconnecting') && styles.recordBtnPending,
           ]}
           onPress={handleToggleRecording}
-          disabled={bleStatus === 'scanning' || bleStatus === 'connecting'}
+          disabled={bleStatus === 'scanning' || bleStatus === 'connecting' || bleStatus === 'reconnecting'}
           activeOpacity={0.8}
         >
           <Text style={styles.recordBtnText}>{recordBtnLabel}</Text>
