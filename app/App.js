@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
+  AppState,
   Modal,
   SafeAreaView,
   ScrollView,
@@ -15,15 +16,10 @@ import AccGraph from './components/AccGraph';
 import EventsTable from './components/EventsTable';
 import AddEventModal from './components/AddEventModal';
 import { usePolarH10 } from './ble/usePolarH10';
+import { polarService } from './ble/PolarService';
 import { useSessionLogger } from './recording/useSessionLogger';
 
-const SAMPLE_RATE = 130;
-const WINDOW_SECONDS = 5;
-const MAX_SAMPLES = SAMPLE_RATE * WINDOW_SECONDS; // 650
-const DRAIN_INTERVAL_MS = 100;
-
-const ACC_SAMPLE_RATE  = 25;
-const MAX_ACC_SAMPLES  = ACC_SAMPLE_RATE * WINDOW_SECONDS; // 125
+const WINDOW_SECONDS = 10;
 
 const STATUS_LABEL = {
   idle:         { text: 'Остановлено',           color: '#6b7280' },
@@ -42,56 +38,58 @@ export default function App() {
   const [savedPaths, setSavedPaths] = useState(null);
   const pendingEventTime = useRef(null);
 
-  const { bleStatus, bleError, deviceName, sampleCount, startBle, stopBle, drainSamples, drainAccSamples, getSessionElapsed } = usePolarH10();
-  const { startSession, restoreSession, logEcgPoints, logAccPoints, logEvent, flushSession, endSession, resetDirectory } = useSessionLogger();
+  const { bleStatus, bleError, deviceName, sampleCount, startBle, stopBle, getSessionElapsed } = usePolarH10();
+  const { startSession, restoreSession, logEcgPoints, logAccPoints, writeEvents, readEvents, flushSession, syncToSaf, endSession, resetDirectory, readRecentPoints } = useSessionLogger();
   const isRecording = bleStatus === 'streaming';
 
-  // If the app was restarted while the FGS kept BLE alive, reattach to the active session
+  // On mount: restore active session if one exists.
+  // - FGS alive (streaming): reattach normally, re-register flush callback.
+  // - FGS dead (orphaned): sync tmp → SAF and clean up silently.
   useEffect(() => {
-    if (bleStatus === 'streaming') {
-      restoreSession().catch(console.warn);
-    }
+    restoreSession().then((ok) => {
+      if (!ok) return;
+      if (bleStatus === 'streaming') {
+        polarService.setFlushCallback((ecg, acc) => {
+          if (ecg.length) logEcgPoints(ecg);
+          if (acc.length) logAccPoints(acc);
+          flushSession();
+        });
+        return readEvents().then((evts) => { if (evts?.length) setEvents(evts); });
+      } else {
+        // Orphaned session: sync whatever accumulated in tmp → SAF, then clean up
+        return endSession().catch(console.warn);
+      }
+    }).catch(console.warn);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Flush all streams to disk every 5 minutes
+  // Copy tmp → SAF whenever user opens the interface
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') syncToSaf().catch(console.warn);
+    });
+    return () => sub.remove();
+  }, [syncToSaf]);
+
+
+  // Update graphs every 3s by reading the last WINDOW_SECONDS from the tmp file (sync, O(1))
   useEffect(() => {
     if (!isRecording) return;
     const id = setInterval(() => {
-      try { flushSession(); } catch (e) { console.warn('Periodic flush failed:', e); }
-    }, 10_000);
-    return () => clearInterval(id);
-  }, [isRecording, flushSession]);
-
-  // Drain BLE buffers → update graphs + write to CSV
-  useEffect(() => {
-    if (!isRecording) return;
-    const id = setInterval(() => {
-      // ECG
-      const ecgPts = drainSamples();
-      if (ecgPts.length > 0) {
-        logEcgPoints(ecgPts);
-        setEcgData((prev) => {
-          const next = [...prev, ...ecgPts];
-          return next.length > MAX_SAMPLES ? next.slice(next.length - MAX_SAMPLES) : next;
-        });
+      try {
+        const { ecg, acc } = readRecentPoints(WINDOW_SECONDS);
+        if (ecg.length) setEcgData(ecg);
+        if (acc.length) {
+          setAccData(acc.map(({ t, x, y, z }) => ({
+            x: t,
+            y: Math.sqrt(x * x + y * y + z * z),
+          })));
+        }
+      } catch (e) {
+        console.warn('readRecentPoints:', e);
       }
-
-      // ACC — amplitude per sample, 5-second rolling window
-      const accPts = drainAccSamples();
-      if (accPts.length > 0) {
-        logAccPoints(accPts);
-        const amplPts = accPts.map(({ t, x, y, z }) => ({
-          x: t,
-          y: Math.sqrt(x * x + y * y + z * z),
-        }));
-        setAccData((prev) => {
-          const next = [...prev, ...amplPts];
-          return next.length > MAX_ACC_SAMPLES ? next.slice(next.length - MAX_ACC_SAMPLES) : next;
-        });
-      }
-    }, DRAIN_INTERVAL_MS);
+    }, 3000);
     return () => clearInterval(id);
-  }, [isRecording, drainSamples, drainAccSamples, logEcgPoints, logAccPoints]); // eslint-disable-line
+  }, [isRecording, readRecentPoints]);
 
   const handleToggleRecording = async () => {
     if (bleStatus === 'idle' || bleStatus === 'error') {
@@ -108,8 +106,14 @@ export default function App() {
         return;
       }
       if (!sessionStarted) return; // user cancelled folder picker
+      polarService.setFlushCallback((ecg, acc) => {
+        if (ecg.length) logEcgPoints(ecg);
+        if (acc.length) logAccPoints(acc);
+        flushSession();
+      });
       await startBle();
     } else {
+      polarService.setFlushCallback(null);
       await stopBle();
       try {
         const paths = await endSession();
@@ -129,8 +133,11 @@ export default function App() {
 
   const handleEventConfirm = ({ description, stress }) => {
     const event = { id: Date.now(), timeS: pendingEventTime.current, description, stress };
-    setEvents((prev) => [...prev, event]);
-    logEvent(event); // sync, no await
+    setEvents((prev) => {
+      const next = [...prev, event];
+      writeEvents(next).catch(console.warn);
+      return next;
+    });
     setShowModal(false);
   };
 

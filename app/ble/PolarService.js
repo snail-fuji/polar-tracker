@@ -10,6 +10,7 @@ import {
 } from './polarProtocol';
 
 const SAMPLE_RATE = 130;
+const FLUSH_EVERY_SAMPLES = SAMPLE_RATE * 5; // flush every ~5s of ECG data
 const SCAN_TIMEOUT_MS = 12000;
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 const MAX_RECONNECT_ATTEMPTS = 10;
@@ -53,6 +54,8 @@ class PolarService {
     this._reconnectAttempts = 0;
     this._stopped = true;
     this._resolveTask = null;
+    this._onFlush = null;
+    this._samplesSinceFlush = 0;
 
     // Resume reconnect if Bluetooth was toggled off and back on mid-session
     this._bleStateSub = this._manager.onStateChange((state) => {
@@ -88,6 +91,10 @@ class PolarService {
     return pts;
   }
 
+  setFlushCallback(fn) {
+    this._onFlush = fn;
+  }
+
   getSessionElapsed() {
     if (!this._sessionWallMs) return 0;
     return (Date.now() - this._sessionWallMs) / 1000;
@@ -115,6 +122,7 @@ class PolarService {
     this._accBuffer = [];
     this._sessionStartNs = null;
     this._sessionWallMs = null;
+    this._samplesSinceFlush = 0;
     this._deviceId = null;
     this._deviceName = null;
     this._errorMsg = null;
@@ -152,6 +160,7 @@ class PolarService {
       this._device = null;
     }
 
+    this._onFlush = null;
     this._resolveTask?.();
     this._resolveTask = null;
     try { await BackgroundActions.stop(); } catch (_) {}
@@ -169,7 +178,9 @@ class PolarService {
     } catch (e) {
       this._setStatus('error', e.message);
     }
-    // Keep the foreground service alive until stop() resolves this promise
+    // Keep the foreground service alive until stop() resolves this promise.
+    // Periodic flush is driven by _handleFrame sample count — not by a JS timer —
+    // because JS timers are throttled in background even with FGS.
     await new Promise((resolve) => { this._resolveTask = resolve; });
   };
 
@@ -315,6 +326,13 @@ class PolarService {
       samples.forEach((uV, i) => {
         this._ecgBuffer.push({ x: baseS + i / SAMPLE_RATE, y: uV * 1e-3 });
       });
+      this._samplesSinceFlush += samples.length;
+      if (this._samplesSinceFlush >= FLUSH_EVERY_SAMPLES && this._onFlush) {
+        this._samplesSinceFlush = 0;
+        const ecg = this.drainEcg();
+        const acc = this.drainAcc();
+        Promise.resolve(this._onFlush(ecg, acc)).catch(console.warn);
+      }
     } else if (bytes[0] === 0x02) {
       const samples = parseAccFrame(bytes);
       if (!samples.length) return;
