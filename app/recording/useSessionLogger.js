@@ -1,20 +1,15 @@
 import { useCallback, useRef } from 'react';
-import {
-  StorageAccessFramework,
-  writeAsStringAsync,
-  readAsStringAsync,
-  deleteAsync,
-  documentDirectory,
-  EncodingType,
-} from 'expo-file-system/legacy';
-import { File } from 'expo-file-system';
+import { StorageAccessFramework, writeAsStringAsync, readAsStringAsync, EncodingType } from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { appendToSafUri } from '../native/safAppend';
 
 const SAF_DIR_KEY        = 'polar_saf_dir_uri';
 const ACTIVE_SESSION_KEY = 'polar_active_session';
 
-// 32 KB covers ~10s of ECG (130 Hz × ~20 B/line = 26 KB) with margin
-const TAIL_BYTES = 32_768;
+// In-memory ring buffer: keep last MAX_RING points per stream.
+// At 130 Hz ECG and 25 Hz ACC, 10s = 1300 + 250 points — well within budget.
+const MAX_ECG_RING = 1400;
+const MAX_ACC_RING = 300;
 
 async function getSavedDirUri() {
   try { return await AsyncStorage.getItem(SAF_DIR_KEY); } catch { return null; }
@@ -38,42 +33,31 @@ function buildTimestamp() {
 }
 
 const UTF8 = { encoding: EncodingType.UTF8 };
-const enc  = new TextEncoder();
-const dec  = new TextDecoder();
-
-function appendToTmp(path, lines) {
-  if (!lines.length) return;
-  const handle = new File(path).open();
-  handle.offset = handle.size;
-  handle.writeBytes(enc.encode(lines.join('\n') + '\n'));
-  handle.close();
-}
-
-// Read last TAIL_BYTES of a tmp file synchronously; skip first partial line.
-function readTail(path) {
-  try {
-    const handle = new File(path).open();
-    const size = handle.size ?? 0;
-    if (size === 0) { handle.close(); return ''; }
-    const start = Math.max(0, size - TAIL_BYTES);
-    handle.offset = start;
-    const bytes = handle.readBytes(size - start);
-    handle.close();
-    const text = dec.decode(bytes);
-    // If we read from mid-file, the first line may be partial — drop it
-    return start > 0 ? text.slice(text.indexOf('\n') + 1) : text;
-  } catch {
-    return '';
-  }
-}
 
 function formatEvent(e) {
   const desc = e.description.replace(/"/g, '""');
   return `${e.timeS.toFixed(3)},${e.stress},"${desc}"`;
 }
 
+// Push items into a capped ring array in-place.
+function pushRing(ring, items, max) {
+  ring.push(...items);
+  if (ring.length > max) ring.splice(0, ring.length - max);
+}
+
+// Parse last N lines from a CSV string (skipping header), returning parsed points.
+function parseTailLines(content, n, parse) {
+  const lines = content.split('\n').filter(Boolean);
+  // skip header row
+  return lines.slice(Math.max(1, lines.length - n)).map(parse).filter(Boolean);
+}
+
 export function useSessionLogger() {
   const sessionRef = useRef(null);
+
+  // ecgRing / accRing: in-memory ring buffers for graph display
+  const ecgRing = useRef([]);
+  const accRing = useRef([]);
 
   const startSession = useCallback(async () => {
     let dirUri = await getSavedDirUri();
@@ -93,17 +77,17 @@ export function useSessionLogger() {
       throw new Error(`Не удалось создать файлы: ${e.message}. Попробуйте ещё раз — появится выбор папки.`);
     }
 
-    const ecgTmp = `${documentDirectory}${ts}_ecg.csv`;
-    const accTmp = `${documentDirectory}${ts}_acc.csv`;
-
     await Promise.all([
-      writeAsStringAsync(ecgTmp,    'timestamp_s,ecg_mV\n',                     UTF8),
-      writeAsStringAsync(accTmp,    'timestamp_s,acc_x_mG,acc_y_mG,acc_z_mG\n', UTF8),
-      writeAsStringAsync(eventsUri, 'timestamp_s,stress,description\n',          UTF8),
+      appendToSafUri(ecgUri,    'timestamp_s,ecg_mV\n'),
+      appendToSafUri(accUri,    'timestamp_s,acc_x_mG,acc_y_mG,acc_z_mG\n'),
+      writeAsStringAsync(eventsUri, 'timestamp_s,stress,description\n', UTF8),
     ]);
 
-    sessionRef.current = { ecgUri, accUri, eventsUri, ecgTmp, accTmp, ecgLines: [], accLines: [] };
-    await AsyncStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify({ ecgUri, accUri, eventsUri, ecgTmp, accTmp }));
+    ecgRing.current = [];
+    accRing.current = [];
+
+    sessionRef.current = { ecgUri, accUri, eventsUri, ecgLines: [], accLines: [] };
+    await AsyncStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify({ ecgUri, accUri, eventsUri }));
     return true;
   }, []);
 
@@ -111,12 +95,14 @@ export function useSessionLogger() {
     if (!sessionRef.current) return;
     for (const p of pts)
       sessionRef.current.ecgLines.push(`${p.x.toFixed(4)},${p.y.toFixed(6)}`);
+    pushRing(ecgRing.current, pts, MAX_ECG_RING);
   }, []);
 
   const logAccPoints = useCallback((pts) => {
     if (!sessionRef.current) return;
     for (const p of pts)
       sessionRef.current.accLines.push(`${p.t.toFixed(4)},${p.x},${p.y},${p.z}`);
+    pushRing(accRing.current, pts, MAX_ACC_RING);
   }, []);
 
   const writeEvents = useCallback(async (evts) => {
@@ -141,68 +127,61 @@ export function useSessionLogger() {
     }
   }, []);
 
-  // Reads last ~5s from tmp files synchronously — O(1) regardless of session length.
+  // Returns last windowSeconds of data from in-memory ring buffers.
   const readRecentPoints = useCallback((windowSeconds = 5) => {
-    const session = sessionRef.current;
-    if (!session) return { ecg: [], acc: [] };
-    const tail = (raw, n, parse) =>
-      raw.split('\n').filter(Boolean).slice(-n).map(parse).filter(Boolean);
-    const ecg = tail(readTail(session.ecgTmp), Math.round(130 * windowSeconds), (line) => {
-      const [x, y] = line.split(',');
-      const px = parseFloat(x), py = parseFloat(y);
-      return isNaN(px) || isNaN(py) ? null : { x: px, y: py };
-    });
-    const acc = tail(readTail(session.accTmp), Math.round(25 * windowSeconds), (line) => {
-      const [t, x, y, z] = line.split(',');
-      const pt = parseFloat(t);
-      return isNaN(pt) ? null : { t: pt, x: parseFloat(x), y: parseFloat(y), z: parseFloat(z) };
-    });
+    const ecg = ecgRing.current.slice(-Math.round(130 * windowSeconds));
+    const acc = accRing.current.slice(-Math.round(25 * windowSeconds));
     return { ecg, acc };
   }, []);
 
-  // Drains in-memory buffers to tmp files only. Fast and sync.
-  // SAF copy happens via syncToSaf() on AppState 'active' and endSession().
-  const flushSession = useCallback(() => {
+  // Drains in-memory line buffers → SAF files (async append).
+  const flushSession = useCallback(async () => {
     const session = sessionRef.current;
     if (!session) return;
-    appendToTmp(session.ecgTmp, session.ecgLines.splice(0));
-    appendToTmp(session.accTmp, session.accLines.splice(0));
-  }, []);
-
-  // Full tmp → SAF copy. Called when user opens the UI or session ends.
-  const syncToSaf = useCallback(async () => {
-    const session = sessionRef.current;
-    if (!session) return;
-    const [ecg, acc] = await Promise.all([
-      readAsStringAsync(session.ecgTmp, UTF8),
-      readAsStringAsync(session.accTmp, UTF8),
-    ]);
-    await Promise.all([
-      writeAsStringAsync(session.ecgUri, ecg, UTF8),
-      writeAsStringAsync(session.accUri, acc, UTF8),
-    ]);
+    const ecgChunk = session.ecgLines.splice(0);
+    const accChunk = session.accLines.splice(0);
+    const writes = [];
+    if (ecgChunk.length) writes.push(appendToSafUri(session.ecgUri, ecgChunk.join('\n') + '\n'));
+    if (accChunk.length) writes.push(appendToSafUri(session.accUri, accChunk.join('\n') + '\n'));
+    if (writes.length) await Promise.all(writes);
   }, []);
 
   const endSession = useCallback(async () => {
     const session = sessionRef.current;
     if (!session) return null;
-    flushSession();
-    await syncToSaf();
+    await flushSession();
     sessionRef.current = null;
+    ecgRing.current = [];
+    accRing.current = [];
     await AsyncStorage.removeItem(ACTIVE_SESSION_KEY);
-    await Promise.all([
-      deleteAsync(session.ecgTmp, { idempotent: true }),
-      deleteAsync(session.accTmp, { idempotent: true }),
-    ]);
     return { ecgUri: session.ecgUri, accUri: session.accUri, eventsUri: session.eventsUri };
-  }, [flushSession, syncToSaf]);
+  }, [flushSession]);
 
+  // Restores session metadata from AsyncStorage and pre-populates ring buffers
+  // by reading the tail of the SAF files (one-time, on mount).
   const restoreSession = useCallback(async () => {
     try {
       const saved = await AsyncStorage.getItem(ACTIVE_SESSION_KEY);
       if (!saved) return false;
       const meta = JSON.parse(saved);
       sessionRef.current = { ...meta, ecgLines: [], accLines: [] };
+
+      // Pre-populate ring buffers from existing SAF data so graph shows immediately.
+      const [ecgContent, accContent] = await Promise.all([
+        readAsStringAsync(meta.ecgUri, UTF8).catch(() => ''),
+        readAsStringAsync(meta.accUri, UTF8).catch(() => ''),
+      ]);
+      ecgRing.current = parseTailLines(ecgContent, MAX_ECG_RING, (line) => {
+        const [x, y] = line.split(',');
+        const px = parseFloat(x), py = parseFloat(y);
+        return isNaN(px) || isNaN(py) ? null : { x: px, y: py };
+      });
+      accRing.current = parseTailLines(accContent, MAX_ACC_RING, (line) => {
+        const [t, x, y, z] = line.split(',');
+        const pt = parseFloat(t);
+        return isNaN(pt) ? null : { t: pt, x: parseFloat(x), y: parseFloat(y), z: parseFloat(z) };
+      });
+
       return true;
     } catch {
       return false;
@@ -217,6 +196,6 @@ export function useSessionLogger() {
     startSession, restoreSession,
     logEcgPoints, logAccPoints,
     writeEvents, readEvents,
-    flushSession, syncToSaf, endSession, resetDirectory, readRecentPoints,
+    flushSession, endSession, resetDirectory, readRecentPoints,
   };
 }

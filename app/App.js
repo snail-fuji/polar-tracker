@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
-  AppState,
   Modal,
   SafeAreaView,
   ScrollView,
@@ -39,7 +38,7 @@ export default function App() {
   const pendingEventTime = useRef(null);
 
   const { bleStatus, bleError, deviceName, sampleCount, startBle, stopBle, getSessionElapsed } = usePolarH10();
-  const { startSession, restoreSession, logEcgPoints, logAccPoints, writeEvents, readEvents, flushSession, syncToSaf, endSession, resetDirectory, readRecentPoints } = useSessionLogger();
+  const { startSession, restoreSession, logEcgPoints, logAccPoints, writeEvents, readEvents, flushSession, endSession, resetDirectory, readRecentPoints } = useSessionLogger();
   const isRecording = bleStatus === 'streaming';
 
   // On mount: restore active session if one exists.
@@ -49,10 +48,10 @@ export default function App() {
     restoreSession().then((ok) => {
       if (!ok) return;
       if (bleStatus === 'streaming') {
-        polarService.setFlushCallback((ecg, acc) => {
+        polarService.setFlushCallback(async (ecg, acc) => {
           if (ecg.length) logEcgPoints(ecg);
           if (acc.length) logAccPoints(acc);
-          flushSession();
+          await flushSession();
         });
         return readEvents().then((evts) => { if (evts?.length) setEvents(evts); });
       } else {
@@ -62,16 +61,9 @@ export default function App() {
     }).catch(console.warn);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Copy tmp → SAF whenever user opens the interface
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (next) => {
-      if (next === 'active') syncToSaf().catch(console.warn);
-    });
-    return () => sub.remove();
-  }, [syncToSaf]);
 
 
-  // Update graphs every 3s by reading the last WINDOW_SECONDS from the tmp file (sync, O(1))
+  // Update graphs every 500ms from in-memory ring buffer (no I/O).
   useEffect(() => {
     if (!isRecording) return;
     const id = setInterval(() => {
@@ -87,7 +79,7 @@ export default function App() {
       } catch (e) {
         console.warn('readRecentPoints:', e);
       }
-    }, 3000);
+    }, 500);
     return () => clearInterval(id);
   }, [isRecording, readRecentPoints]);
 
@@ -106,10 +98,10 @@ export default function App() {
         return;
       }
       if (!sessionStarted) return; // user cancelled folder picker
-      polarService.setFlushCallback((ecg, acc) => {
+      polarService.setFlushCallback(async (ecg, acc) => {
         if (ecg.length) logEcgPoints(ecg);
         if (acc.length) logAccPoints(acc);
-        flushSession();
+        await flushSession();
       });
       await startBle();
     } else {
