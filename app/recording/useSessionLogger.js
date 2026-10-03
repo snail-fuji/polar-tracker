@@ -67,11 +67,12 @@ export function useSessionLogger() {
     }
 
     const ts = buildTimestamp();
-    let ecgUri, eventsUri, accUri;
+    let ecgUri, eventsUri, accUri, logUri;
     try {
       ecgUri    = await createCsv(dirUri, `polar_${ts}_ecg`);
       eventsUri = await createCsv(dirUri, `polar_${ts}_events`);
       accUri    = await createCsv(dirUri, `polar_${ts}_acc`);
+      logUri    = await createCsv(dirUri, `polar_${ts}_log`);
     } catch (e) {
       await AsyncStorage.removeItem(SAF_DIR_KEY);
       throw new Error(`Не удалось создать файлы: ${e.message}. Попробуйте ещё раз — появится выбор папки.`);
@@ -80,14 +81,15 @@ export function useSessionLogger() {
     await Promise.all([
       appendToSafUri(ecgUri,    'timestamp_s,ecg_mV\n'),
       appendToSafUri(accUri,    'timestamp_s,acc_x_mG,acc_y_mG,acc_z_mG\n'),
+      appendToSafUri(logUri,    'wall_time,status,message\n'),
       writeAsStringAsync(eventsUri, 'timestamp_s,stress,description\n', UTF8),
     ]);
 
     ecgRing.current = [];
     accRing.current = [];
 
-    sessionRef.current = { ecgUri, accUri, eventsUri, ecgLines: [], accLines: [] };
-    await AsyncStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify({ ecgUri, accUri, eventsUri }));
+    sessionRef.current = { ecgUri, accUri, eventsUri, logUri, ecgLines: [], accLines: [] };
+    await AsyncStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify({ ecgUri, accUri, eventsUri, logUri }));
     return true;
   }, []);
 
@@ -103,6 +105,14 @@ export function useSessionLogger() {
     for (const p of pts)
       sessionRef.current.accLines.push(`${p.t.toFixed(4)},${p.x},${p.y},${p.z}`);
     pushRing(accRing.current, pts, MAX_ACC_RING);
+  }, []);
+
+  // Appends a connection-status line to the session log (diagnostics for overnight drops).
+  const logStatus = useCallback(async (status, message = '') => {
+    const uri = sessionRef.current?.logUri;
+    if (!uri) return;
+    const msg = String(message ?? '').replace(/"/g, '""');
+    await appendToSafUri(uri, `${new Date().toISOString()},${status},"${msg}"\n`);
   }, []);
 
   const writeEvents = useCallback(async (evts) => {
@@ -195,7 +205,7 @@ export function useSessionLogger() {
   return {
     startSession, restoreSession,
     logEcgPoints, logAccPoints,
-    writeEvents, readEvents,
+    writeEvents, readEvents, logStatus,
     flushSession, endSession, resetDirectory, readRecentPoints,
   };
 }

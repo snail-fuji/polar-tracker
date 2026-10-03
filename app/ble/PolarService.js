@@ -8,12 +8,18 @@ import {
   bytesToBase64, base64ToBytes,
   parseEcgFrame, parseAccFrame, extractFrameTimestampNs,
 } from './polarProtocol';
+import { acquireWakeLock, releaseWakeLock } from '../native/recordingPower';
 
 const SAMPLE_RATE = 130;
 const FLUSH_EVERY_SAMPLES = SAMPLE_RATE * 5; // flush every ~5s of ECG data
 const SCAN_TIMEOUT_MS = 12000;
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000, 30000];
-const MAX_RECONNECT_ATTEMPTS = 10;
+// After this many fast attempts on a known device, stop polling and hand the
+// reconnect to the Android BT stack (autoConnect) — it waits indefinitely
+// and doesn't depend on JS timers firing while the CPU sleeps.
+const FAST_RECONNECT_ATTEMPTS = 6;
+// Scan-only (device never seen): give up after this many attempts.
+const MAX_SCAN_ATTEMPTS = 10;
 
 async function requestBlePermissions() {
   if (Platform.OS !== 'android') return true;
@@ -52,6 +58,7 @@ class PolarService {
     this._scanTimer = null;
     this._reconnectTimer = null;
     this._reconnectAttempts = 0;
+    this._autoConnectPending = false;
     this._stopped = true;
     this._resolveTask = null;
     this._onFlush = null;
@@ -59,7 +66,8 @@ class PolarService {
 
     // Resume reconnect if Bluetooth was toggled off and back on mid-session
     this._bleStateSub = this._manager.onStateChange((state) => {
-      if (state === State.PoweredOn && this._status === 'reconnecting' && !this._stopped) {
+      if (state === State.PoweredOn && this._status === 'reconnecting'
+          && !this._stopped && !this._autoConnectPending) {
         clearTimeout(this._reconnectTimer);
         this._connect();
       }
@@ -101,6 +109,12 @@ class PolarService {
   }
 
   async start() {
+    // After a fatal error the FGS is still up — tear it down before retrying.
+    if (!this._stopped && this._status === 'error') {
+      const onFlush = this._onFlush; // set by the caller for the new session; stop() clears it
+      await this.stop();
+      this._onFlush = onFlush;
+    }
     if (!this._stopped) return;
 
     // Must request BT permissions BEFORE BackgroundActions.start() —
@@ -126,6 +140,10 @@ class PolarService {
     this._deviceId = null;
     this._deviceName = null;
     this._errorMsg = null;
+
+    // Without a wakelock, JS timers (reconnect backoff) stall in Doze once the
+    // BLE stream stops waking the CPU.
+    await acquireWakeLock().catch(console.warn);
 
     await BackgroundActions.start(this._backgroundTask, {
       taskName: 'PolarRecording',
@@ -158,12 +176,16 @@ class PolarService {
         }
       } catch (_) {}
       this._device = null;
+    } else if (this._deviceId && this._autoConnectPending) {
+      try { await this._manager.cancelDeviceConnection(this._deviceId); } catch (_) {}
     }
+    this._autoConnectPending = false;
 
     this._onFlush = null;
     this._resolveTask?.();
     this._resolveTask = null;
     try { await BackgroundActions.stop(); } catch (_) {}
+    await releaseWakeLock().catch(console.warn);
 
     this._setStatus('idle');
     this._deviceName = null;
@@ -243,11 +265,16 @@ class PolarService {
   }
 
   async _connectToKnownDevice() {
-    this._setStatus('connecting');
+    const waitForDevice = this._reconnectAttempts >= FAST_RECONNECT_ATTEMPTS;
+    this._setStatus(waitForDevice ? 'reconnecting' : 'connecting');
+    this._autoConnectPending = waitForDevice;
     try {
-      const device = await this._manager.connectToDevice(this._deviceId, { autoConnect: false });
+      const device = await this._manager.connectToDevice(this._deviceId, { autoConnect: waitForDevice });
+      this._autoConnectPending = false;
+      if (this._stopped) return;
       await this._setupDevice(device);
     } catch (_) {
+      this._autoConnectPending = false;
       if (!this._stopped) this._scheduleReconnect();
     }
   }
@@ -263,6 +290,7 @@ class PolarService {
   }
 
   async _setupDevice(connected) {
+    this._cleanupSubscriptions(); // drop leftovers from a half-finished previous setup
     await connected.discoverAllServicesAndCharacteristics();
     await connected.requestMTU(232);
     this._device = connected;
@@ -349,10 +377,14 @@ class PolarService {
   }
 
   _scheduleReconnect() {
-    if (this._stopped || this._reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      this._setStatus('error', 'Не удалось восстановить соединение с Polar H10');
+    if (this._stopped) return;
+    // Known device: never give up mid-session. Unknown device: initial scan failed.
+    if (!this._deviceId && this._reconnectAttempts >= MAX_SCAN_ATTEMPTS) {
+      this._setStatus('error', 'Polar H10 не найден');
       return;
     }
+    // Disconnect callback and data-subscription error can both fire for one drop.
+    clearTimeout(this._reconnectTimer);
 
     const delay = RECONNECT_DELAYS_MS[
       Math.min(this._reconnectAttempts, RECONNECT_DELAYS_MS.length - 1)

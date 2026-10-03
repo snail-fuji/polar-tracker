@@ -17,6 +17,7 @@ import AddEventModal from './components/AddEventModal';
 import { usePolarH10 } from './ble/usePolarH10';
 import { polarService } from './ble/PolarService';
 import { useSessionLogger } from './recording/useSessionLogger';
+import { isIgnoringBatteryOptimizations, requestIgnoreBatteryOptimizations } from './native/recordingPower';
 
 const WINDOW_SECONDS = 10;
 
@@ -38,7 +39,7 @@ export default function App() {
   const pendingEventTime = useRef(null);
 
   const { bleStatus, bleError, deviceName, sampleCount, startBle, stopBle, getSessionElapsed } = usePolarH10();
-  const { startSession, restoreSession, logEcgPoints, logAccPoints, writeEvents, readEvents, flushSession, endSession, resetDirectory, readRecentPoints } = useSessionLogger();
+  const { startSession, restoreSession, logEcgPoints, logAccPoints, writeEvents, readEvents, logStatus, flushSession, endSession, resetDirectory, readRecentPoints } = useSessionLogger();
   const isRecording = bleStatus === 'streaming';
 
   // On mount: restore active session if one exists.
@@ -62,6 +63,26 @@ export default function App() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
 
+
+  // Write every connection-status change to the session log file.
+  useEffect(() => polarService.subscribe(({ status, errorMsg }) => {
+    logStatus(status, errorMsg).catch(console.warn);
+  }), [logStatus]);
+
+  // Overnight recording dies in Doze / vendor battery savers unless the app is exempt.
+  useEffect(() => {
+    isIgnoringBatteryOptimizations().then((ignoring) => {
+      if (ignoring) return;
+      Alert.alert(
+        'Фоновая запись',
+        'Чтобы запись не прерывалась ночью, разрешите приложению работать без ограничений батареи.',
+        [
+          { text: 'Позже', style: 'cancel' },
+          { text: 'Разрешить', onPress: () => requestIgnoreBatteryOptimizations().catch(console.warn) },
+        ],
+      );
+    }).catch(console.warn);
+  }, []);
 
   // Update graphs every 500ms from in-memory ring buffer (no I/O).
   useEffect(() => {
