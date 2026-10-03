@@ -3,6 +3,10 @@ export const PMD_SERVICE = 'fb005c80-02e7-f387-1cad-8acd2d8df0c8';
 export const PMD_CONTROL = 'fb005c81-02e7-f387-1cad-8acd2d8df0c8';
 export const PMD_DATA    = 'fb005c82-02e7-f387-1cad-8acd2d8df0c8';
 
+// Standard BLE Battery Service: one byte, 0–100 %
+export const BATTERY_SERVICE = '0000180f-0000-1000-8000-00805f9b34fb';
+export const BATTERY_LEVEL   = '00002a19-0000-1000-8000-00805f9b34fb';
+
 // START_MEASUREMENT (0x02), ECG type (0x00),
 // SAMPLE_RATE = 130 Hz, RESOLUTION = 14 bit
 export const ECG_START = [0x02, 0x00, 0x00, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0E, 0x00];

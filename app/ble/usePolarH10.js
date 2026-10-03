@@ -33,6 +33,7 @@ export function usePolarH10() {
     bleStatus: snapshot.status,
     bleError: snapshot.errorMsg,
     deviceName: snapshot.deviceName,
+    batteryLevel: snapshot.batteryLevel,
     sampleCount,
     startBle,
     stopBle,

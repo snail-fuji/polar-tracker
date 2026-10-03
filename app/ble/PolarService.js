@@ -3,6 +3,7 @@ import { BleManager, State } from 'react-native-ble-plx';
 import BackgroundActions from 'react-native-background-actions';
 import {
   PMD_SERVICE, PMD_CONTROL, PMD_DATA,
+  BATTERY_SERVICE, BATTERY_LEVEL,
   ECG_START, ECG_STOP,
   ACC_FS, ACC_START, ACC_STOP,
   bytesToBase64, base64ToBytes,
@@ -45,6 +46,7 @@ class PolarService {
     this._device = null;
     this._deviceId = null;
     this._deviceName = null;
+    this._batteryLevel = null; // H10 charge %, kept across reconnects
 
     this._ecgBuffer = [];
     this._accBuffer = [];
@@ -54,6 +56,7 @@ class PolarService {
     this._listeners = new Set();
     this._dataSubscription = null;
     this._ctrlSubscription = null;
+    this._batterySubscription = null;
     this._disconnectSubscription = null;
     this._scanTimer = null;
     this._reconnectTimer = null;
@@ -77,7 +80,12 @@ class PolarService {
   // --- Public API ---
 
   getSnapshot() {
-    return { status: this._status, errorMsg: this._errorMsg, deviceName: this._deviceName };
+    return {
+      status: this._status,
+      errorMsg: this._errorMsg,
+      deviceName: this._deviceName,
+      batteryLevel: this._batteryLevel,
+    };
   }
 
   // Returns unsubscribe function; fires immediately with current snapshot
@@ -139,6 +147,7 @@ class PolarService {
     this._samplesSinceFlush = 0;
     this._deviceId = null;
     this._deviceName = null;
+    this._batteryLevel = null;
     this._errorMsg = null;
 
     // Without a wakelock, JS timers (reconnect backoff) stall in Doze once the
@@ -187,8 +196,9 @@ class PolarService {
     try { await BackgroundActions.stop(); } catch (_) {}
     await releaseWakeLock().catch(console.warn);
 
-    this._setStatus('idle');
     this._deviceName = null;
+    this._batteryLevel = null;
+    this._setStatus('idle');
     this._errorMsg = null;
   }
 
@@ -210,8 +220,32 @@ class PolarService {
     if (this._status === status && this._errorMsg === errorMsg) return;
     this._status = status;
     this._errorMsg = errorMsg;
+    this._emit();
+  }
+
+  _emit() {
     const snap = this.getSnapshot();
     this._listeners.forEach((l) => l(snap));
+  }
+
+  _setBatteryLevel(base64) {
+    const level = base64ToBytes(base64)[0];
+    if (level === undefined || level === this._batteryLevel) return;
+    this._batteryLevel = level;
+    this._emit();
+  }
+
+  // Battery is informational: failures here must never break the ECG stream.
+  async _setupBattery(connected) {
+    try {
+      const char = await connected.readCharacteristicForService(BATTERY_SERVICE, BATTERY_LEVEL);
+      if (char?.value) this._setBatteryLevel(char.value);
+    } catch (_) {}
+    if (this._device !== connected) return; // disconnected while reading
+    this._batterySubscription = connected.monitorCharacteristicForService(
+      BATTERY_SERVICE, BATTERY_LEVEL,
+      (err, char) => { if (!err && char?.value) this._setBatteryLevel(char.value); },
+    );
   }
 
   _cleanupSubscriptions() {
@@ -221,6 +255,8 @@ class PolarService {
     this._ctrlSubscription = null;
     this._dataSubscription?.remove();
     this._dataSubscription = null;
+    this._batterySubscription?.remove();
+    this._batterySubscription = null;
     this._disconnectSubscription?.remove();
     this._disconnectSubscription = null;
   }
@@ -339,6 +375,7 @@ class PolarService {
 
     this._reconnectAttempts = 0;
     this._setStatus('streaming');
+    this._setupBattery(connected);
   }
 
   _handleFrame(bytes) {

@@ -30,6 +30,12 @@ const STATUS_LABEL = {
   error:        { text: 'Ошибка',                color: '#dc2626' },
 };
 
+function batteryColor(level) {
+  if (level <= 15) return '#dc2626';
+  if (level <= 35) return '#d97706';
+  return '#16a34a';
+}
+
 export default function App() {
   const [ecgData, setEcgData] = useState([]);
   const [accData, setAccData] = useState([]);
@@ -38,7 +44,7 @@ export default function App() {
   const [savedPaths, setSavedPaths] = useState(null);
   const pendingEventTime = useRef(null);
 
-  const { bleStatus, bleError, deviceName, sampleCount, startBle, stopBle, getSessionElapsed } = usePolarH10();
+  const { bleStatus, bleError, deviceName, batteryLevel, sampleCount, startBle, stopBle, getSessionElapsed } = usePolarH10();
   const { startSession, restoreSession, logEcgPoints, logAccPoints, writeEvents, readEvents, logStatus, flushSession, endSession, resetDirectory, readRecentPoints } = useSessionLogger();
   const isRecording = bleStatus === 'streaming';
 
@@ -65,9 +71,19 @@ export default function App() {
 
 
   // Write every connection-status change to the session log file.
-  useEffect(() => polarService.subscribe(({ status, errorMsg }) => {
-    logStatus(status, errorMsg).catch(console.warn);
-  }), [logStatus]);
+  // Snapshots also fire on battery updates — log only actual changes.
+  useEffect(() => {
+    let prev = {};
+    return polarService.subscribe(({ status, errorMsg, batteryLevel }) => {
+      if (status !== prev.status || errorMsg !== prev.errorMsg) {
+        logStatus(status, errorMsg).catch(console.warn);
+      }
+      if (batteryLevel != null && batteryLevel !== prev.batteryLevel) {
+        logStatus('battery', `${batteryLevel}%`).catch(console.warn);
+      }
+      prev = { status, errorMsg, batteryLevel };
+    });
+  }, [logStatus]);
 
   // Overnight recording dies in Doze / vendor battery savers unless the app is exempt.
   useEffect(() => {
@@ -192,7 +208,12 @@ export default function App() {
           </Text>
         </Text>
         {deviceName && (
-          <Text style={styles.deviceName}>📡 {deviceName}</Text>
+          <Text style={styles.deviceName}>
+            📡 {deviceName}
+            {batteryLevel != null && (
+              <Text style={{ color: batteryColor(batteryLevel) }}>  🔋 {batteryLevel}%</Text>
+            )}
+          </Text>
         )}
         {bleStatus === 'streaming' && (
           <Text style={styles.debugText}>samples received: {sampleCount}</Text>
